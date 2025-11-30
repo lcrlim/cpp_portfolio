@@ -372,12 +372,12 @@ public:
         socket_.set_option(tcp::no_delay(true), ec);
         socket_.set_option(boost::asio::socket_base::keep_alive(true), ec);
 
-        // [수정] IO Strand 위에서 코루틴 시작 (Race Condition 방지)
+        // IO Strand 위에서 코루틴 시작 (Race Condition 방지)
         co_spawn(io_strand_, [self = shared_from_this()] { return self->ProcessLoop(); }, detached);
     }
 
     void Stop() {
-        // [수정] 소켓 닫기도 IO Strand 안에서 수행
+        // 소켓 닫기도 IO Strand 안에서 수행
         boost::asio::post(io_strand_, [this, self = shared_from_this()]() {
             if (socket_.is_open()) {
                 spdlog::info("[Stop] Closing socket for {}", id_);
@@ -386,7 +386,10 @@ public:
             }
         });
         
-        if (!id_.empty()) g_SessionManager.Remove(id_);
+        if (!id_.empty()) {
+            g_SessionManager.Remove(id_);
+            id_ = "";
+        }
     }
 
     void Send(uint16_t id, const google::protobuf::Message& msg) {
@@ -399,7 +402,7 @@ public:
         
         if (!msg.SerializeToArray(buffer->data() + sizeof(PacketHeader), bodySize)) return;
 
-        // [수정] Write 작업도 IO Strand로 Post
+        //  Write 작업도 IO Strand로 Post
         boost::asio::post(io_strand_, [self = shared_from_this(), buffer]() {
              boost::asio::async_write(self->socket_, boost::asio::buffer(*buffer),
                 [self, buffer](boost::system::error_code ec, size_t) {
@@ -413,13 +416,13 @@ private:
     awaitable<void> ProcessLoop() {
         try {
             while (true) {
-                // 1. [IO Strand] 헤더 읽기
+                // 1. 헤더 읽기
                 PacketHeader header;
                 co_await boost::asio::async_read(socket_, boost::asio::buffer(&header, sizeof(header)), use_awaitable);
 
                 if (header.length > MAX_PACKET_SIZE) throw std::runtime_error("Packet too large");
 
-                // 2. [IO Strand] 바디 읽기
+                // 2. 바디 읽기
                 std::vector<uint8_t> body(header.length);
                 co_await boost::asio::async_read(socket_, boost::asio::buffer(body), use_awaitable);
                 
@@ -570,7 +573,7 @@ int main() {
 
         // --- [대시보드 루프] ---
         while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            std::this_thread::sleep_for(std::chrono::seconds(2));
             std::cout << "\033[2J\033[H";
             
             std::cout << "================ [Server Dashboard] ================" << std::endl;
