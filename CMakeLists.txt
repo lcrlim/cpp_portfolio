@@ -9,7 +9,7 @@ if(WIN32)
 endif()
 
 # 1. 패키지 찾기
-find_package(Boost REQUIRED)
+find_package(Boost COMPONENTS asio REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(spdlog REQUIRED)
 
@@ -40,14 +40,25 @@ target_link_libraries(protobuf_messages PRIVATE protobuf::libprotobuf) # Link pr
 
 
 
+find_package(yaml-cpp REQUIRED)
+
 # --- [Server] ---
 add_executable(Server Server.cpp)
 target_include_directories(Server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROTO_GEN_DIR})
 target_link_libraries(Server PRIVATE 
     protobuf_messages # Link the new static library
-    Boost::headers 
+    Boost::asio 
     spdlog::spdlog
     nlohmann_json::nlohmann_json
+    yaml-cpp::yaml-cpp
+)
+
+add_custom_command(
+    TARGET Server POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+            "${CMAKE_CURRENT_SOURCE_DIR}/server_config.yaml"
+            "$<TARGET_FILE_DIR:Server>/server_config.yaml"
+    COMMENT "Copying server_config.yaml to Server executable directory"
 )
 
 if(WIN32)
@@ -59,6 +70,6 @@ add_executable(Client Client.cpp)
 target_include_directories(Client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROTO_GEN_DIR})
 target_link_libraries(Client PRIVATE 
     protobuf_messages # Link the new static library
-    Boost::headers 
+    Boost::asio 
     spdlog::spdlog
 )

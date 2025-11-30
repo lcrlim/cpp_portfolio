@@ -7,7 +7,7 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/async.h>
 #include <spdlog/sinks/basic_file_sink.h>
-#include <nlohmann/json.hpp>
+#include <yaml-cpp/yaml.h>
 #include <unordered_map>
 #include <shared_mutex>
 #include <deque>
@@ -45,7 +45,7 @@ using boost::asio::co_spawn;
 using boost::asio::detached;
 using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
-using json = nlohmann::json;
+
 
 // =========================================================================================
 // [전역 변수 선언] - 클래스 정의보다 반드시 먼저 나와야 합니다.
@@ -104,18 +104,20 @@ LONG WINAPI CreateMiniDump(EXCEPTION_POINTERS* pep) {
 #endif
 
 void LoadConfig() {
-    std::ifstream configFile("server_config.json");
-    if (configFile.is_open()) {
-        try {
-            json j;
-            configFile >> j;
-            g_Config.port = j.value("port", 11000);
-            g_Config.log_level = j.value("log_level", "info");
-            g_Config.log_file = j.value("log_file", "logs/server.log");
-        }
-        catch (std::exception& e) {
-            std::cerr << "Config Error: " << e.what() << std::endl;
-        }
+    try {
+        YAML::Node config = YAML::LoadFile("server_config.yaml");
+        g_Config.port = config["port"].as<int>(11000);
+        g_Config.log_level = config["log_level"].as<std::string>("info");
+        g_Config.log_file = config["log_file"].as<std::string>("logs/server.log");
+    }
+    catch (const YAML::BadFile& e) {
+        std::cerr << "Config Error: Could not open or parse server_config.yaml: " << e.what() << std::endl;
+    }
+    catch (const YAML::Exception& e) {
+        std::cerr << "Config Error: YAML parsing error: " << e.what() << std::endl;
+    }
+    catch (std::exception& e) {
+        std::cerr << "Config Error: " << e.what() << std::endl;
     }
 }
 
@@ -550,15 +552,15 @@ int main() {
         std::vector<std::thread> io_threads;
         std::vector<std::thread> worker_threads;
 
-        // 1. IO 스레드 (CPU 코어 수)
-        int io_thread_count = std::thread::hardware_concurrency();
+        // 1. IO 스레드 (CPU 코어 수 * 2)
+        int io_thread_count = std::thread::hardware_concurrency() * 2;
         for (int i = 0; i < io_thread_count; ++i) {
             io_threads.emplace_back([] { g_IoContext.run(); });
         }
         spdlog::info("[Init] IO Threads Created: {}", io_thread_count);
 
-        // 2. Worker 스레드 (30개 고정)
-        int worker_thread_count = 30;
+        // 2. Worker 스레드 (CPU 코어 수 * 2)
+        int worker_thread_count = std::thread::hardware_concurrency() * 2;
         // Work Guard: Worker Context가 할 일이 없어도 종료되지 않도록 함
         auto work_guard = boost::asio::make_work_guard(g_WorkerContext);
         for (int i = 0; i < worker_thread_count; ++i) {

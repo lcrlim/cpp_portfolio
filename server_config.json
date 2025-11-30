@@ -1,5 +1,0 @@
-{
-  "port": 11000,
-  "log_level": "trace",
-  "log_file": "logs/server.log"
-}

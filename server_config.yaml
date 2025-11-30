@@ -1,0 +1,3 @@
+port: 11000
+log_level: debug
+log_file: logs/server.log
