@@ -12,7 +12,7 @@ endif()
 find_package(Boost REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(spdlog REQUIRED)
-find_package(absl REQUIRED)
+
 find_package(nlohmann_json REQUIRED)
 
 # 2. Protobuf 생성 경로 설정
@@ -33,14 +33,19 @@ add_custom_command(
     COMMENT "Generating Protobuf files..."
 )
 
+# Create a static library for protobuf-generated files
+add_library(protobuf_messages STATIC ${PROTO_SRC})
+target_include_directories(protobuf_messages PRIVATE ${PROTO_GEN_DIR}) # Include generated headers path
+target_link_libraries(protobuf_messages PRIVATE protobuf::libprotobuf) # Link protobuf library to the static library
+
 
 
 # --- [Server] ---
-add_executable(Server Server.cpp ${PROTO_SRC} ${PROTO_HDR})
-target_include_directories(Server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROTO_GEN_DIR} ${Protobuf_INCLUDE_DIRS})
+add_executable(Server Server.cpp)
+target_include_directories(Server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROTO_GEN_DIR})
 target_link_libraries(Server PRIVATE 
+    protobuf_messages # Link the new static library
     Boost::headers 
-    protobuf::libprotobuf 
     spdlog::spdlog
     nlohmann_json::nlohmann_json
 )
@@ -50,10 +55,10 @@ if(WIN32)
 endif()
 
 # --- [Client] ---
-add_executable(Client Client.cpp ${PROTO_SRC} ${PROTO_HDR})
-target_include_directories(Client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROTO_GEN_DIR} ${Protobuf_INCLUDE_DIRS})
+add_executable(Client Client.cpp)
+target_include_directories(Client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROTO_GEN_DIR})
 target_link_libraries(Client PRIVATE 
+    protobuf_messages # Link the new static library
     Boost::headers 
-    protobuf::libprotobuf 
     spdlog::spdlog
 )
