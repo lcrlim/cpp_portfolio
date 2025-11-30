@@ -1,11 +1,13 @@
 #include <iostream>
+#include <fstream>
 #include <boost/asio.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <spdlog/spdlog.h>
 #include <spdlog/async.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <nlohmann/json.hpp>
 #include <unordered_map>
 #include <shared_mutex>
 #include <deque>
@@ -23,12 +25,27 @@
 #include "game.pb.h"
 #include "Common.h"
 
+// --- [OS Specific Headers] ---
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#include <pdh.h>
+#include <dbghelp.h>
+#pragma comment(lib, "pdh.lib")
+#pragma comment(lib, "Dbghelp.lib")
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/processor_info.h>
+#include <mach/mach_host.h>
+#endif
+
 using boost::asio::ip::tcp;
 using boost::asio::awaitable;
 using boost::asio::co_spawn;
 using boost::asio::detached;
 using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
+using json = nlohmann::json;
 
 // =========================================================================================
 // [전역 변수 선언] - 클래스 정의보다 반드시 먼저 나와야 합니다.
@@ -40,12 +57,188 @@ boost::asio::io_context g_IoContext;
 // 2. 로직/DB 처리를 위한 컨텍스트 (30개 고정 스레드)
 boost::asio::io_context g_WorkerContext;
 
+struct ServerConfig {
+    int port = 11000;
+    std::string log_level = "info";
+    std::string log_file = "logs/server.log";
+};
+ServerConfig g_Config;
 
 // =========================================================================================
-// [유틸리티 함수]
+// [유틸리티 함수 & 클래스]
 // =========================================================================================
 
-// 메모리 사용량 측정 함수 (MacOS)
+std::string ToUtf8(const std::string& str) {
+#ifdef _WIN32
+    if (str.empty()) return "";
+    int size_needed = MultiByteToWideChar(CP_ACP, 0, &str[0], (int)str.size(), NULL, 0);
+    std::wstring wstrTo(size_needed, 0);
+    MultiByteToWideChar(CP_ACP, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
+
+    int size_needed_utf8 = WideCharToMultiByte(CP_UTF8, 0, &wstrTo[0], (int)wstrTo.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed_utf8, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstrTo[0], (int)wstrTo.size(), &strTo[0], size_needed_utf8, NULL, NULL);
+    return strTo;
+#else
+    return str;
+#endif
+}
+
+#ifdef _WIN32
+LONG WINAPI CreateMiniDump(EXCEPTION_POINTERS* pep) {
+    HANDLE hFile = CreateFileW(L"ServerCrash.dmp", GENERIC_READ | GENERIC_WRITE,
+        0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    if ((hFile != NULL) && (hFile != INVALID_HANDLE_VALUE)) {
+        MINIDUMP_EXCEPTION_INFORMATION mdei;
+        mdei.ThreadId = GetCurrentThreadId();
+        mdei.ExceptionPointers = pep;
+        mdei.ClientPointers = FALSE;
+
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(),
+            hFile, MiniDumpNormal, (pep != 0) ? &mdei : 0, 0, 0);
+        CloseHandle(hFile);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
+void LoadConfig() {
+    std::ifstream configFile("server_config.json");
+    if (configFile.is_open()) {
+        try {
+            json j;
+            configFile >> j;
+            g_Config.port = j.value("port", 11000);
+            g_Config.log_level = j.value("log_level", "info");
+            g_Config.log_file = j.value("log_file", "logs/server.log");
+        }
+        catch (std::exception& e) {
+            std::cerr << "Config Error: " << e.what() << std::endl;
+        }
+    }
+}
+
+class SystemMonitor {
+public:
+    SystemMonitor() { Init(); }
+
+    void Init() {
+#ifdef _WIN32
+        SYSTEM_INFO sysInfo;
+        GetSystemInfo(&sysInfo);
+        num_processors_ = sysInfo.dwNumberOfProcessors;
+
+        GetSystemTimes(&prev_sys_idle_, &prev_sys_kernel_, &prev_sys_user_);
+
+        FILETIME c, e, k, u;
+        GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+        prev_proc_kernel_ = FileTimeToInt64(k);
+        prev_proc_user_ = FileTimeToInt64(u);
+        prev_proc_time_ = std::chrono::steady_clock::now();
+#elif defined(__APPLE__)
+        host_cpu_load_info_data_t cpuinfo;
+        mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+        host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&cpuinfo, &count);
+        for (int i = 0; i < CPU_STATE_MAX; ++i) prev_cpu_load_[i] = cpuinfo.cpu_ticks[i];
+#endif
+    }
+
+    double GetTotalCpu() {
+#ifdef _WIN32
+        FILETIME idle, kernel, user;
+        if (!GetSystemTimes(&idle, &kernel, &user)) return 0.0;
+
+        uint64_t now_idle = FileTimeToInt64(idle);
+        uint64_t now_kernel = FileTimeToInt64(kernel);
+        uint64_t now_user = FileTimeToInt64(user);
+
+        uint64_t diff_idle = now_idle - FileTimeToInt64(prev_sys_idle_);
+        uint64_t diff_kernel = now_kernel - FileTimeToInt64(prev_sys_kernel_);
+        uint64_t diff_user = now_user - FileTimeToInt64(prev_sys_user_);
+        
+        uint64_t total_sys = diff_kernel + diff_user;
+        if (total_sys == 0) return 0.0;
+
+        prev_sys_idle_ = idle;
+        prev_sys_kernel_ = kernel;
+        prev_sys_user_ = user;
+
+        return (1.0 - (double)diff_idle / total_sys) * 100.0;
+#elif defined(__APPLE__)
+        host_cpu_load_info_data_t cpuinfo;
+        mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+        if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&cpuinfo, &count) != KERN_SUCCESS) return 0.0;
+
+        unsigned long long totalTicks = 0;
+        for (int i = 0; i < CPU_STATE_MAX; ++i) totalTicks += cpuinfo.cpu_ticks[i];
+
+        unsigned long long prevTotalTicks = 0;
+        for (int i = 0; i < CPU_STATE_MAX; ++i) prevTotalTicks += prev_cpu_load_[i];
+
+        unsigned long long userTicks = cpuinfo.cpu_ticks[CPU_STATE_USER] - prev_cpu_load_[CPU_STATE_USER];
+        unsigned long long sysTicks = cpuinfo.cpu_ticks[CPU_STATE_SYSTEM] - prev_cpu_load_[CPU_STATE_SYSTEM];
+        unsigned long long niceTicks = cpuinfo.cpu_ticks[CPU_STATE_NICE] - prev_cpu_load_[CPU_STATE_NICE];
+        unsigned long long totalDiff = totalTicks - prevTotalTicks;
+
+        for (int i = 0; i < CPU_STATE_MAX; ++i) prev_cpu_load_[i] = cpuinfo.cpu_ticks[i];
+
+        if (totalDiff == 0) return 0.0;
+        return (double)(userTicks + sysTicks + niceTicks) / totalDiff * 100.0;
+#else
+        return 0.0;
+#endif
+    }
+
+    double GetProcessCpu() {
+#ifdef _WIN32
+        FILETIME c, e, k, u;
+        if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0.0;
+
+        uint64_t now_k = FileTimeToInt64(k);
+        uint64_t now_u = FileTimeToInt64(u);
+        uint64_t diff = (now_k - prev_proc_kernel_) + (now_u - prev_proc_user_);
+
+        auto now = std::chrono::steady_clock::now();
+        std::chrono::duration<double> elapsed = now - prev_proc_time_;
+        double elapsed_sec = elapsed.count();
+
+        if (elapsed_sec <= 0.0) return 0.0;
+
+        prev_proc_kernel_ = now_k;
+        prev_proc_user_ = now_u;
+        prev_proc_time_ = now;
+
+        // (Process Time / (Wall Time * Processors)) * 100
+        return (diff / 10000000.0) / (elapsed_sec * num_processors_) * 100.0; 
+#elif defined(__APPLE__)
+        struct task_basic_info t_info;
+        mach_msg_type_number_t t_info_count = TASK_BASIC_INFO_COUNT;
+        if (KERN_SUCCESS != task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&t_info, &t_info_count)) return 0.0;
+        
+        return 0.0; 
+#else
+        return 0.0;
+#endif
+    }
+
+private:
+#ifdef _WIN32
+    uint64_t FileTimeToInt64(const FILETIME& ft) {
+        return ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    }
+    FILETIME prev_sys_idle_, prev_sys_kernel_, prev_sys_user_;
+    uint64_t prev_proc_kernel_ = 0, prev_proc_user_ = 0;
+    std::chrono::time_point<std::chrono::steady_clock> prev_proc_time_;
+    int num_processors_ = 1;
+#elif defined(__APPLE__)
+    unsigned long long prev_cpu_load_[CPU_STATE_MAX] = { 0 };
+#endif
+};
+
+SystemMonitor g_SystemMonitor;
+
+// 메모리 사용량 측정 함수
 size_t GetMemoryUsage() {
 #ifdef __APPLE__
     struct mach_task_basic_info info;
@@ -54,8 +247,13 @@ size_t GetMemoryUsage() {
         (task_info_t)&info, &infoCount) != KERN_SUCCESS)
         return 0;
     return (size_t)info.resident_size; // Bytes
+#elif defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+        return pmc.WorkingSetSize;
+    return 0;
 #else
-    return 0; // Linux/Windows 등은 별도 구현 필요
+    return 0;
 #endif
 }
 
@@ -155,12 +353,23 @@ public:
           // [중요] 전역 변수 g_IoContext가 위에서 선언되어 있어야 에러가 안 납니다.
           io_strand_(boost::asio::make_strand(g_IoContext)),
           worker_strand_(boost::asio::make_strand(g_WorkerContext)) 
-    {}
+    {
+        spdlog::info("[Connect] Client Connected: {}", socket_.remote_endpoint().address().to_string());
+    }
+
+    ~GameSession() {
+        // Note: socket_ might be closed already
+        spdlog::info("[Disconnect] Session Destroyed");
+    }
 
     void SetID(std::string id) { id_ = id; }
     std::string GetID() { return id_; }
 
     void Start() {
+        boost::system::error_code ec;
+        socket_.set_option(tcp::no_delay(true), ec);
+        socket_.set_option(boost::asio::socket_base::keep_alive(true), ec);
+
         // [수정] IO Strand 위에서 코루틴 시작 (Race Condition 방지)
         co_spawn(io_strand_, [self = shared_from_this()] { return self->ProcessLoop(); }, detached);
     }
@@ -169,6 +378,7 @@ public:
         // [수정] 소켓 닫기도 IO Strand 안에서 수행
         boost::asio::post(io_strand_, [this, self = shared_from_this()]() {
             if (socket_.is_open()) {
+                spdlog::info("[Stop] Closing socket for {}", id_);
                 boost::system::error_code ec;
                 socket_.close(ec);
             }
@@ -210,6 +420,8 @@ private:
                 // 2. [IO Strand] 바디 읽기
                 std::vector<uint8_t> body(header.length);
                 co_await boost::asio::async_read(socket_, boost::asio::buffer(body), use_awaitable);
+                
+                spdlog::trace("[Recv] PacketID: {}, Size: {}", header.id, header.length);
 
                 g_ServerStats.RecordPacket();
 
@@ -224,7 +436,18 @@ private:
                 // 다시 읽기 작업을 위해 소켓 Executor(IO Strand)로 돌아옵니다.
                 co_await boost::asio::post(io_strand_, use_awaitable);
             }
-        } catch (std::exception&) {
+        } catch (const boost::system::system_error& e) {
+            // 10054(Connection Reset), EOF, 10009(Bad Descriptor), 995(Operation Aborted)는 일반적인 종료 상황으로 처리
+            if (e.code() != boost::asio::error::connection_reset &&
+                e.code() != boost::asio::error::eof &&
+                e.code() != boost::asio::error::bad_descriptor &&
+                e.code() != boost::asio::error::operation_aborted) 
+            {
+                 spdlog::warn("[Error] ProcessLoop Error: {} ({})", ToUtf8(e.what()), e.code().value());
+            }
+            Stop();
+        } catch (const std::exception& e) {
+            spdlog::warn("[Error] ProcessLoop Exception: {}", ToUtf8(e.what()));
             Stop();
         }
     }
@@ -236,6 +459,8 @@ private:
             if (req.ParseFromArray(body.data(), static_cast<int>(body.size()))) {
                 this->SetID(req.user_id());
                 g_SessionManager.Add(shared_from_this());
+                spdlog::info("[Login] User: {}", req.user_id());
+                
                 game::LoginResponse res;
                 res.set_success(true);
                 res.set_message("Welcome");
@@ -244,7 +469,15 @@ private:
             break;
         }
         case game::LOGOUT_REQ: {
+            spdlog::info("[Logout] User: {}", id_);
             Stop();
+            break;
+        }
+        case game::GET_CHARACTER_LIST_REQ: {
+            game::GetCharacterListResponse res;
+            res.add_characters("Hero_Warrior");
+            res.add_characters("Mage_Fire");
+            Send(game::GET_CHARACTER_LIST_RES, res);
             break;
         }
         }
@@ -268,6 +501,7 @@ void SessionManager::Remove(const std::string& id) {
 }
 
 awaitable<void> Listener(tcp::acceptor acceptor) {
+    spdlog::info("[Listener] Started on port {}", acceptor.local_endpoint().port());
     while (true) {
         auto socket = co_await acceptor.async_accept(use_awaitable);
         std::make_shared<GameSession>(std::move(socket))->Start();
@@ -279,17 +513,37 @@ awaitable<void> Listener(tcp::acceptor acceptor) {
 // [메인 함수]
 // =========================================================================================
 int main() {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(CreateMiniDump);
+    SetConsoleOutputCP(65001); // UTF-8 Console Output
+#endif
+
+    LoadConfig();
+
     spdlog::init_thread_pool(8192, 1);
-    auto stdout_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    stdout_sink->set_level(spdlog::level::warn); 
-    auto async_logger = std::make_shared<spdlog::async_logger>("server", stdout_sink, spdlog::thread_pool(), spdlog::async_overflow_policy::block);
+    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(g_Config.log_file, true);
+    
+    spdlog::level::level_enum log_level = spdlog::level::info;
+    if (g_Config.log_level == "debug") log_level = spdlog::level::debug;
+    else if (g_Config.log_level == "trace") log_level = spdlog::level::trace;
+    else if (g_Config.log_level == "warn") log_level = spdlog::level::warn;
+    else if (g_Config.log_level == "err") log_level = spdlog::level::err;
+    
+    file_sink->set_level(log_level);
+    
+    auto async_logger = std::make_shared<spdlog::async_logger>("server", file_sink, spdlog::thread_pool(), spdlog::async_overflow_policy::block);
+    async_logger->set_level(log_level);
     spdlog::set_default_logger(async_logger);
+    spdlog::flush_on(spdlog::level::warn);
+
+    spdlog::info("[Init] Server Starting...");
+    spdlog::info("[Init] Config Loaded - Port: {}, LogLevel: {}", g_Config.port, g_Config.log_level);
 
     try {
         // 통계 타이머는 IO 컨텍스트에서 실행
         g_ServerStats.Start(g_IoContext);
 
-        tcp::acceptor acceptor(g_IoContext, { tcp::v4(), 11000 });
+        tcp::acceptor acceptor(g_IoContext, { tcp::v4(), (unsigned short)g_Config.port });
         co_spawn(g_IoContext, Listener(std::move(acceptor)), detached);
 
         // --- 스레드 그룹 생성 ---
@@ -301,6 +555,7 @@ int main() {
         for (int i = 0; i < io_thread_count; ++i) {
             io_threads.emplace_back([] { g_IoContext.run(); });
         }
+        spdlog::info("[Init] IO Threads Created: {}", io_thread_count);
 
         // 2. Worker 스레드 (30개 고정)
         int worker_thread_count = 30;
@@ -309,6 +564,7 @@ int main() {
         for (int i = 0; i < worker_thread_count; ++i) {
             worker_threads.emplace_back([] { g_WorkerContext.run(); });
         }
+        spdlog::info("[Init] Worker Threads Created: {}", worker_thread_count);
 
         // --- [대시보드 루프] ---
         while (true) {
@@ -317,9 +573,12 @@ int main() {
             
             std::cout << "================ [Server Dashboard] ================" << std::endl;
             std::cout << " Status           : Running (IO/Worker Separated)" << std::endl;
+            std::cout << " Config           : Port=" << g_Config.port << ", Log=" << g_Config.log_level << std::endl;
             std::cout << " IO Threads       : " << io_thread_count << " (Net I/O)" << std::endl;
             std::cout << " Worker Threads   : " << worker_thread_count << " (Logic/DB)" << std::endl;
             std::cout << " Memory Usage     : " << FormatBytes(GetMemoryUsage()) << std::endl;
+            std::cout << " CPU Usage (Sys)  : " << std::fixed << std::setprecision(1) << g_SystemMonitor.GetTotalCpu() << " %" << std::endl;
+            std::cout << " CPU Usage (Proc) : " << std::fixed << std::setprecision(1) << g_SystemMonitor.GetProcessCpu() << " %" << std::endl;
             std::cout << "----------------------------------------------------" << std::endl;
             std::cout << " Connected Users  : " << g_SessionManager.Count() << std::endl;
             std::cout << " Current TPS      : " << g_ServerStats.GetCurrentTPS() << " pkts/sec" << std::endl;
@@ -337,6 +596,7 @@ int main() {
         for (auto& t : worker_threads) t.join();
     }
     catch (std::exception& e) {
+        spdlog::error("[Fatal] Exception: {}", e.what());
         std::cerr << "Exception: " << e.what() << std::endl;
     }
     return 0;

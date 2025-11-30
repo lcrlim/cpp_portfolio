@@ -83,9 +83,25 @@ awaitable<void> RunClient(boost::asio::io_context& io_context, int clientIdx) {
             co_await boost::asio::async_write(socket, boost::asio::buffer(sendBuf), use_awaitable);
             g_TotalSent++;
 
-            // 3. 1초 대기 (로그인 상태 유지)
-            timer.expires_after(std::chrono::seconds(1));
-            co_await timer.async_wait(use_awaitable);
+            // 3. Get Character List 100 times
+            for (int i = 0; i < 100; ++i) {
+                game::GetCharacterListRequest charReq;
+                charReq.set_user_id(userId);
+
+                bodySize = (uint16_t)charReq.ByteSizeLong();
+                sendBuf.resize(sizeof(PacketHeader) + bodySize);
+                header = reinterpret_cast<PacketHeader*>(sendBuf.data());
+                header->length = bodySize;
+                header->id = game::GET_CHARACTER_LIST_REQ;
+                charReq.SerializeToArray(sendBuf.data() + sizeof(PacketHeader), bodySize);
+
+                co_await boost::asio::async_write(socket, boost::asio::buffer(sendBuf), use_awaitable);
+                g_TotalSent++;
+                
+                // 10ms 딜레이 (부하 조절)
+                timer.expires_after(std::chrono::milliseconds(10));
+                co_await timer.async_wait(use_awaitable);
+            }
 
             // 4. 로그아웃 요청 전송
             game::LogoutRequest logoutReq;

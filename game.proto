@@ -7,6 +7,8 @@ enum PacketID {
   LOGIN_RES = 1002;
   LOGOUT_REQ = 1003;
   LOGOUT_RES = 1004;
+  GET_CHARACTER_LIST_REQ = 1005;
+  GET_CHARACTER_LIST_RES = 1006;
 }
 
 message LoginRequest {
@@ -20,4 +22,12 @@ message LoginResponse {
 
 message LogoutRequest {
   string user_id = 1;
+}
+
+message GetCharacterListRequest {
+  string user_id = 1;
+}
+
+message GetCharacterListResponse {
+  repeated string characters = 1;
 }
