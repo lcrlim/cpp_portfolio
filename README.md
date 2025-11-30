@@ -1,7 +1,7 @@
 # C++20 TCP Server
 
-이 프로젝트는 **Boost.Asio**와 **C++20 Coroutines**를 활용하여 개발된 고성능 비동기 TCP 게임 서버 프로토타입입니다. 
-동시 접속자 처리(100K)를 목표로 설계되었으며, Google Protobuf를 사용하여 패킷 직렬화를 처리합니다.
+이 프로젝트는 **Boost.Asio**와 **C++20 Coroutines**를 활용하여 개발된 비동기 TCP 서버 프로토타입입니다. 
+대량의 동시 접속자 처리를 목표로 설계되었으며, Google Protobuf를 사용하여 패킷 직렬화를 처리합니다.
 
 ## Key Features
 
