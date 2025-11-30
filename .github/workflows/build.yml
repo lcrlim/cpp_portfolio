@@ -10,16 +10,24 @@ jobs:
   windows-build:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v4 # This checks out *this* repository (cpp_portfolio)
+      with:
+        path: cpp_portfolio # Check it out into a folder named cpp_portfolio
+
+    - name: Checkout vcpkg
+      uses: actions/checkout@v4
+      with:
+        repository: microsoft/vcpkg # Specify the vcpkg repository
+        path: vcpkg # Check out vcpkg into a folder named vcpkg at the root of the runner's workspace
 
     - name: Bootstrap vcpkg
-      run: cmd /c ${{ github.workspace }}/vcpkg/bootstrap-vcpkg.bat
+      run: cmd /c vcpkg/bootstrap-vcpkg.bat # Path to vcpkg from the workspace root
 
     - name: Install vcpkg dependencies
-      run: cmd /c ${{ github.workspace }}/vcpkg/vcpkg.exe install boost protobuf spdlog abseil nlohmann-json --triplet x64-windows
+      run: cmd /c vcpkg/vcpkg.exe install boost protobuf spdlog abseil nlohmann-json --triplet x64-windows
 
     - name: Configure CMake for Windows
-      run: cmake -G "Visual Studio 17 2022" -S cpp_portfolio -B cpp_portfolio/build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      run: cmake -G "Visual Studio 17 2022" -S cpp_portfolio -B cpp_portfolio/build -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake
 
     - name: Build with CMake for Windows
       run: cmake --build cpp_portfolio/build --config Release
@@ -29,8 +37,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Update Homebrew
+      run: brew update
+
+    - name: Run Homebrew Doctor
+      run: brew doctor
+
     - name: Install dependencies with Homebrew
-      run: brew install boost protobuf spdlog abseil nlohmann-json cmake
+      run: brew install boost protobuf spdlog abseil-cpp nlohmann-json cmake
 
     - name: Configure CMake for macOS
       run: cmake -S cpp_portfolio -B cpp_portfolio/build
