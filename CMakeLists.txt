@@ -8,11 +8,11 @@ if(WIN32)
     add_compile_definitions(_WIN32_WINNT=0x0A00)
 endif()
 
-# 1. 패키지 찾기 (Abseil 추가됨)
+# 1. 패키지 찾기
 find_package(Boost REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(spdlog REQUIRED)
-find_package(absl REQUIRED) # <-- 핵심 추가
+find_package(absl REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
 # 2. Protobuf 생성 경로 설정
