@@ -1,0 +1,23 @@
+syntax = "proto3";
+package game;
+
+enum PacketID {
+  NONE = 0;
+  LOGIN_REQ = 1001;
+  LOGIN_RES = 1002;
+  LOGOUT_REQ = 1003;
+  LOGOUT_RES = 1004;
+}
+
+message LoginRequest {
+  string user_id = 1;
+}
+
+message LoginResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message LogoutRequest {
+  string user_id = 1;
+}
