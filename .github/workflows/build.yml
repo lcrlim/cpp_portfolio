@@ -41,7 +41,7 @@ jobs:
       run: brew update
 
     - name: Install dependencies with Homebrew
-      run: brew install boost protobuf spdlog abseil-cpp nlohmann-json yaml-cpp cmake
+      run: brew install boost protobuf spdlog abseil nlohmann-json yaml-cpp cmake
 
     - name: Configure CMake for macOS
       run: cmake -S . -B cpp_portfolio/build
