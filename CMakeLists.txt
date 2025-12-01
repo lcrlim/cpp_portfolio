@@ -18,7 +18,23 @@ else()
 endif()
 
 find_package(Protobuf REQUIRED)
-find_package(absl REQUIRED)
+find_package(absl QUIET)
+set(ABSL_LIBS "")
+if(absl_FOUND)
+    if(TARGET absl::base)
+        list(APPEND ABSL_LIBS absl::base)
+    endif()
+    if(TARGET absl::strings)
+        list(APPEND ABSL_LIBS absl::strings)
+    endif()
+    if(TARGET absl::log_internal_message)
+        list(APPEND ABSL_LIBS absl::log_internal_message)
+    endif()
+    if(TARGET absl::log_internal_check_op)
+        list(APPEND ABSL_LIBS absl::log_internal_check_op)
+    endif()
+endif()
+
 find_package(spdlog REQUIRED)
 
 include(FetchContent)
@@ -97,10 +113,7 @@ target_link_libraries(Server PRIVATE
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
     Threads::Threads
-    absl::base
-    absl::strings
-    absl::log_internal_message
-    absl::log_internal_check_op
+    ${ABSL_LIBS}
 )
 
 add_custom_command(
@@ -123,8 +136,5 @@ target_link_libraries(Client PRIVATE
     ${BOOST_ASIO_TARGET}
     spdlog::spdlog
     Threads::Threads
-    absl::base
-    absl::strings
-    absl::log_internal_message
-    absl::log_internal_check_op
+    ${ABSL_LIBS}
 )
