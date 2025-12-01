@@ -11,8 +11,6 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4 # This checks out *this* repository (cpp_portfolio)
-      with:
-        path: cpp_portfolio # Check it out into a folder named cpp_portfolio
 
     - name: Checkout vcpkg
       uses: actions/checkout@v4
@@ -20,17 +18,28 @@ jobs:
         repository: microsoft/vcpkg # Specify the vcpkg repository
         path: vcpkg # Check out vcpkg into a folder named vcpkg at the root of the runner's workspace
 
+    - name: Cache vcpkg
+      uses: actions/cache@v3
+      with:
+        path: |
+          vcpkg/installed
+          vcpkg/downloads
+          vcpkg/packages
+        key: ${{ runner.os }}-vcpkg-${{ hashFiles('.github/workflows/build.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-vcpkg-
+
     - name: Bootstrap vcpkg
-      run: cmd /c vcpkg\bootstrap-vcpkg.bat
+      run: cmd /c vcpkg\bootstrap-vcpkg.bat # Path to vcpkg from the workspace root
 
     - name: Install vcpkg dependencies
       run: cmd /c vcpkg\vcpkg.exe install boost protobuf spdlog abseil nlohmann-json yaml-cpp --triplet x64-windows
 
     - name: Configure CMake for Windows
-      run: cmake -G "Visual Studio 17 2022" -S cpp_portfolio -B cpp_portfolio/build -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake
+      run: cmake -G "Visual Studio 17 2022" -S . -B build -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
 
     - name: Build with CMake for Windows
-      run: cmake --build cpp_portfolio/build --config Release
+      run: cmake --build build --config Release
 
   macos-build:
     runs-on: macos-latest

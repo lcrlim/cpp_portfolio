@@ -18,6 +18,7 @@ else()
 endif()
 
 find_package(Protobuf REQUIRED)
+find_package(absl REQUIRED)
 find_package(spdlog REQUIRED)
 
 include(FetchContent)
@@ -60,20 +61,16 @@ set(PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR})
 set(PROTO_SRC ${PROTO_GEN_DIR}/game.pb.cc)
 set(PROTO_HDR ${PROTO_GEN_DIR}/game.pb.h)
 
-if(APPLE)
-    if(EXISTS "/opt/homebrew/bin/protoc")
-        set(PROTOC_CMD "/opt/homebrew/bin/protoc")
-    else()
-        set(PROTOC_CMD "protoc")
-    endif()
+if(TARGET protobuf::protoc)
+    set(PROTOC_CMD $<TARGET_FILE:protobuf::protoc>)
+elseif(DEFINED Protobuf_PROTOC_EXECUTABLE)
+    set(PROTOC_CMD ${Protobuf_PROTOC_EXECUTABLE})
 else()
-    if(TARGET protobuf::protoc)
-        set(PROTOC_CMD $<TARGET_FILE:protobuf::protoc>)
-    elseif(Protobuf_PROTOC_EXECUTABLE)
-        set(PROTOC_CMD ${Protobuf_PROTOC_EXECUTABLE})
-    else()
-        set(PROTOC_CMD "protoc")
-    endif()
+    find_program(PROTOC_CMD protoc)
+endif()
+
+if(NOT PROTOC_CMD)
+    message(FATAL_ERROR "protoc executable not found. Please ensure Protobuf is installed correctly.")
 endif()
 
 add_custom_command(
@@ -100,6 +97,10 @@ target_link_libraries(Server PRIVATE
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
     Threads::Threads
+    absl::base
+    absl::strings
+    absl::log_internal_message
+    absl::log_internal_check_op
 )
 
 add_custom_command(
@@ -122,4 +123,8 @@ target_link_libraries(Client PRIVATE
     ${BOOST_ASIO_TARGET}
     spdlog::spdlog
     Threads::Threads
+    absl::base
+    absl::strings
+    absl::log_internal_message
+    absl::log_internal_check_op
 )
