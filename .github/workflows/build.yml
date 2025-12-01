@@ -21,10 +21,10 @@ jobs:
         path: vcpkg # Check out vcpkg into a folder named vcpkg at the root of the runner's workspace
 
     - name: Bootstrap vcpkg
-      run: cmd /c vcpkg/bootstrap-vcpkg.bat # Path to vcpkg from the workspace root
+      run: cmd /c vcpkg\bootstrap-vcpkg.bat
 
     - name: Install vcpkg dependencies
-      run: cmd /c vcpkg/vcpkg.exe install boost protobuf spdlog abseil nlohmann-json yaml-cpp --triplet x64-windows
+      run: cmd /c vcpkg\vcpkg.exe install boost protobuf spdlog abseil nlohmann-json yaml-cpp --triplet x64-windows
 
     - name: Configure CMake for Windows
       run: cmake -G "Visual Studio 17 2022" -S cpp_portfolio -B cpp_portfolio/build -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake
@@ -40,14 +40,11 @@ jobs:
     - name: Update Homebrew
       run: brew update
 
-    - name: Run Homebrew Doctor
-      run: brew doctor
-
     - name: Install dependencies with Homebrew
       run: brew install boost protobuf spdlog abseil-cpp nlohmann-json yaml-cpp cmake
 
     - name: Configure CMake for macOS
-      run: cmake -S cpp_portfolio -B cpp_portfolio/build
+      run: cmake -S . -B cpp_portfolio/build
 
     - name: Build with CMake for macOS
       run: cmake --build cpp_portfolio/build --config Release
@@ -64,7 +61,7 @@ jobs:
       run: sudo apt-get install -y build-essential cmake libboost-all-dev libprotobuf-dev protobuf-compiler libspdlog-dev libyaml-cpp-dev nlohmann-json3-dev libabsl-dev
 
     - name: Configure CMake for Linux
-      run: cmake -S cpp_portfolio -B cpp_portfolio/build -DCMAKE_BUILD_TYPE=Release
+      run: cmake -S . -B cpp_portfolio/build -DCMAKE_BUILD_TYPE=Release
 
     - name: Build with CMake for Linux
       run: cmake --build cpp_portfolio/build --config Release
