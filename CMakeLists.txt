@@ -9,6 +9,7 @@ if(WIN32)
 endif()
 
 # 1. 패키지 찾기
+find_package(Threads REQUIRED)
 find_package(Boost REQUIRED)
 if(TARGET Boost::asio)
     set(BOOST_ASIO_TARGET Boost::asio)
@@ -16,7 +17,7 @@ else()
     set(BOOST_ASIO_TARGET Boost::headers)
 endif()
 
-find_package(Protobuf CONFIG REQUIRED)
+find_package(Protobuf REQUIRED)
 find_package(spdlog REQUIRED)
 
 include(FetchContent)
@@ -68,6 +69,8 @@ if(APPLE)
 else()
     if(TARGET protobuf::protoc)
         set(PROTOC_CMD $<TARGET_FILE:protobuf::protoc>)
+    elseif(Protobuf_PROTOC_EXECUTABLE)
+        set(PROTOC_CMD ${Protobuf_PROTOC_EXECUTABLE})
     else()
         set(PROTOC_CMD "protoc")
     endif()
@@ -96,6 +99,7 @@ target_link_libraries(Server PRIVATE
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
+    Threads::Threads
 )
 
 add_custom_command(
@@ -117,4 +121,5 @@ target_link_libraries(Client PRIVATE
     protobuf_messages # Link the new static library
     ${BOOST_ASIO_TARGET}
     spdlog::spdlog
+    Threads::Threads
 )
