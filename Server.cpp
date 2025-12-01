@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <thread>
 #include <vector>
+#include <filesystem>
 
 // MacOS Memory Check Header
 #ifdef __APPLE__
@@ -37,6 +38,10 @@
 #include <mach/mach.h>
 #include <mach/processor_info.h>
 #include <mach/mach_host.h>
+#elif defined(__linux__)
+#include <sys/types.h>
+#include <sys/sysinfo.h>
+#include <unistd.h>
 #endif
 
 using boost::asio::ip::tcp;
@@ -103,9 +108,18 @@ LONG WINAPI CreateMiniDump(EXCEPTION_POINTERS* pep) {
 }
 #endif
 
-void LoadConfig() {
+void LoadConfig(const char* argv0) {
     try {
-        YAML::Node config = YAML::LoadFile("server_config.yaml");
+        std::filesystem::path exePath(argv0);
+        std::filesystem::path configPath = exePath.parent_path() / "server_config.yaml";
+        
+        // If not found next to executable, try current directory (fallback)
+        if (!std::filesystem::exists(configPath)) {
+            configPath = "server_config.yaml";
+        }
+
+        spdlog::info("[Config] Loading from: {}", configPath.string());
+        YAML::Node config = YAML::LoadFile(configPath.string());
         g_Config.port = config["port"].as<int>(11000);
         g_Config.log_level = config["log_level"].as<std::string>("info");
         g_Config.log_file = config["log_file"].as<std::string>("logs/server.log");
@@ -139,10 +153,28 @@ public:
         prev_proc_user_ = FileTimeToInt64(u);
         prev_proc_time_ = std::chrono::steady_clock::now();
 #elif defined(__APPLE__)
+        num_processors_ = std::thread::hardware_concurrency();
+        if (num_processors_ == 0) num_processors_ = 1;
+
         host_cpu_load_info_data_t cpuinfo;
         mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
         host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&cpuinfo, &count);
         for (int i = 0; i < CPU_STATE_MAX; ++i) prev_cpu_load_[i] = cpuinfo.cpu_ticks[i];
+        
+        struct mach_task_basic_info info;
+        mach_msg_type_number_t infoCount = MACH_TASK_BASIC_INFO_COUNT;
+        if (KERN_SUCCESS == task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &infoCount)) {
+             prev_proc_user_ = info.user_time.seconds * 1000000ULL + info.user_time.microseconds;
+             prev_proc_system_ = info.system_time.seconds * 1000000ULL + info.system_time.microseconds;
+        }
+        prev_proc_time_ = std::chrono::steady_clock::now();
+#elif defined(__linux__)
+        num_processors_ = sysconf(_SC_NPROCESSORS_ONLN);
+        if (num_processors_ < 1) num_processors_ = 1;
+        
+        ReadLinuxSysCpu(prev_sys_idle_, prev_sys_total_);
+        ReadLinuxProcCpu(prev_proc_total_time_);
+        prev_proc_time_ = std::chrono::steady_clock::now();
 #endif
     }
 
@@ -187,6 +219,18 @@ public:
 
         if (totalDiff == 0) return 0.0;
         return (double)(userTicks + sysTicks + niceTicks) / totalDiff * 100.0;
+#elif defined(__linux__)
+        uint64_t idle, total;
+        if (!ReadLinuxSysCpu(idle, total)) return 0.0;
+
+        uint64_t diff_idle = idle - prev_sys_idle_;
+        uint64_t diff_total = total - prev_sys_total_;
+
+        prev_sys_idle_ = idle;
+        prev_sys_total_ = total;
+
+        if (diff_total == 0) return 0.0;
+        return (1.0 - (double)diff_idle / diff_total) * 100.0;
 #else
         return 0.0;
 #endif
@@ -214,11 +258,49 @@ public:
         // (Process Time / (Wall Time * Processors)) * 100
         return (diff / 10000000.0) / (elapsed_sec * num_processors_) * 100.0; 
 #elif defined(__APPLE__)
-        struct task_basic_info t_info;
-        mach_msg_type_number_t t_info_count = TASK_BASIC_INFO_COUNT;
-        if (KERN_SUCCESS != task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&t_info, &t_info_count)) return 0.0;
+        struct mach_task_basic_info info;
+        mach_msg_type_number_t infoCount = MACH_TASK_BASIC_INFO_COUNT;
+        if (KERN_SUCCESS != task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &infoCount)) return 0.0;
         
-        return 0.0; 
+        uint64_t now_user = info.user_time.seconds * 1000000ULL + info.user_time.microseconds;
+        uint64_t now_system = info.system_time.seconds * 1000000ULL + info.system_time.microseconds;
+
+        uint64_t diff_user = (now_user > prev_proc_user_) ? (now_user - prev_proc_user_) : 0;
+        uint64_t diff_system = (now_system > prev_proc_system_) ? (now_system - prev_proc_system_) : 0;
+        uint64_t diff = diff_user + diff_system;
+
+        auto now = std::chrono::steady_clock::now();
+        std::chrono::duration<double> elapsed = now - prev_proc_time_;
+        double elapsed_sec = elapsed.count();
+
+        if (elapsed_sec <= 0.000001) return 0.0;
+        
+        prev_proc_user_ = now_user;
+        prev_proc_system_ = now_system;
+        prev_proc_time_ = now;
+
+        if (num_processors_ <= 0) return 0.0;
+
+        // diff is in microseconds (10^-6)
+        // percentage = (diff / 1000000.0) / (elapsed_sec * num_processors_) * 100.0
+        return (static_cast<double>(diff) / 1000000.0) / (elapsed_sec * num_processors_) * 100.0;
+#elif defined(__linux__)
+        uint64_t total_time;
+        if (!ReadLinuxProcCpu(total_time)) return 0.0;
+
+        uint64_t diff = total_time - prev_proc_total_time_;
+        
+        auto now = std::chrono::steady_clock::now();
+        std::chrono::duration<double> elapsed = now - prev_proc_time_;
+        double elapsed_sec = elapsed.count();
+
+        if (elapsed_sec <= 0.000001) return 0.0;
+
+        prev_proc_total_time_ = total_time;
+        prev_proc_time_ = now;
+        
+        double ticks_per_sec = static_cast<double>(sysconf(_SC_CLK_TCK));
+        return (diff / ticks_per_sec) / (elapsed_sec * num_processors_) * 100.0;
 #else
         return 0.0;
 #endif
@@ -235,6 +317,52 @@ private:
     int num_processors_ = 1;
 #elif defined(__APPLE__)
     unsigned long long prev_cpu_load_[CPU_STATE_MAX] = { 0 };
+    uint64_t prev_proc_user_ = 0;
+    uint64_t prev_proc_system_ = 0;
+    std::chrono::time_point<std::chrono::steady_clock> prev_proc_time_;
+    int num_processors_ = 1;
+#elif defined(__linux__)
+    bool ReadLinuxSysCpu(uint64_t& idle, uint64_t& total) {
+        std::ifstream in("/proc/stat");
+        std::string line;
+        if (std::getline(in, line) && line.substr(0, 3) == "cpu") {
+            std::istringstream iss(line.substr(4));
+            uint64_t val, sum = 0;
+            // user, nice, system, idle, iowait, irq, softirq, steal
+            // indices: 0, 1, 2, 3, 4, 5, 6, 7
+            std::vector<uint64_t> times;
+            while(iss >> val) times.push_back(val);
+            
+            if (times.size() < 4) return false;
+            
+            for (auto t : times) sum += t;
+            idle = times[3]; // idle is 4th
+            total = sum;
+            return true;
+        }
+        return false;
+    }
+    
+    bool ReadLinuxProcCpu(uint64_t& total_time) {
+        std::ifstream in("/proc/self/stat");
+        if (!in.is_open()) return false;
+        
+        // Fields: 14=utime, 15=stime
+        // We need to skip 13 tokens
+        std::string dummy;
+        for (int i = 0; i < 13; ++i) in >> dummy;
+        
+        uint64_t utime, stime;
+        in >> utime >> stime;
+        total_time = utime + stime;
+        return true;
+    }
+
+    uint64_t prev_sys_idle_ = 0;
+    uint64_t prev_sys_total_ = 0;
+    uint64_t prev_proc_total_time_ = 0;
+    std::chrono::time_point<std::chrono::steady_clock> prev_proc_time_;
+    int num_processors_ = 1;
 #endif
 };
 
@@ -253,6 +381,16 @@ size_t GetMemoryUsage() {
     PROCESS_MEMORY_COUNTERS pmc;
     if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
         return pmc.WorkingSetSize;
+    return 0;
+#elif defined(__linux__)
+    std::ifstream in("/proc/self/statm");
+    if (in.is_open()) {
+        long rss;
+        std::string ignore;
+        // statm: size resident shared text lib data dt
+        in >> ignore >> rss; 
+        return rss * sysconf(_SC_PAGESIZE);
+    }
     return 0;
 #else
     return 0;
@@ -517,13 +655,15 @@ awaitable<void> Listener(tcp::acceptor acceptor) {
 // =========================================================================================
 // [메인 함수]
 // =========================================================================================
-int main() {
+int main(int argc, char* argv[]) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(CreateMiniDump);
     SetConsoleOutputCP(65001); // UTF-8 Console Output
 #endif
 
-    LoadConfig();
+    // Handle case where no args are provided, though argv[0] should always exist
+    const char* exe_path = (argc > 0) ? argv[0] : "./Server";
+    LoadConfig(exe_path);
 
     spdlog::init_thread_pool(8192, 1);
     auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(g_Config.log_file, true);

@@ -51,3 +51,20 @@ jobs:
 
     - name: Build with CMake for macOS
       run: cmake --build cpp_portfolio/build --config Release
+
+  linux-build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Update apt-get
+      run: sudo apt-get update
+
+    - name: Install dependencies
+      run: sudo apt-get install -y build-essential cmake libboost-all-dev libprotobuf-dev protobuf-compiler libspdlog-dev libyaml-cpp-dev nlohmann-json3-dev
+
+    - name: Configure CMake for Linux
+      run: cmake -S cpp_portfolio -B cpp_portfolio/build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build with CMake for Linux
+      run: cmake --build cpp_portfolio/build --config Release
